@@ -1,0 +1,112 @@
+Tag-uri folosite:
+TAG 0: tracker-client -> tracker ul trimite informatii despre swarm uri
+si hash urile fisierelor
+TAG 1: peer-client -> pentru descarcarea hash urilor segmentelor
+TAG 2: client-peer -> semnalul care semnifica faptul ca un client a
+terminat de descarcat un fisier
+TAG 3: client-peer -> un client a terminat de descarcat tot ce voia
+TAG 4: tracker-client -> clientul trebuie sa se opreasca cu totul/
+clientul isi opreste upload ul
+TAG 10: tracker-client -> clientul cere acces la tracker
+TAG 11: tracker-client -> tracker il informeaza pe client daca ii da
+acces sau nu
+TAG 12: tracker-client -> clientul elibereaza tracker ul
+TAG 20: client-peer -> clientul cere acces la peer
+TAG 21: peer-client -> peer ul ii spune daca e disponibil sau nu
+TAG 22: client-peer -> clientul elibereaza peer ul
+
+tracker:
+Mai intai tarcker ul va primi de la fiecare client informatiile acestora
+fiind ajutat de functia create_customtype, datele clientilor fiind retinute
+in structuri. De la fiecare client va primi numarul de fisiere detinute,
+numele fisierelor si hash urile. Clientii NU vor decarca niciodata de la
+tarcker. Hash urile primite vor fi retinute intr-un unordered map de forma
+<nume_fisiser, vector<hash uri>>, iar clientii care detin fisierele vor fi
+retinuti in swarm ul cu seeds. Am ales sa tin evidenta pentru seeds si peers
+doar pentru a putea indeplini acest punct din cerinta: "daca mesajul primit este
+de finalizare a unei descarcari de fisier, trackerul marcheaza clientul
+respectiv ca seed". Dupa ce tracker ul primeste informatiile necesare de la
+fiecare client, le trimite tuturor un semnal ack, insemnand ca pot sa inceapa
+download ul. Am folosit o bucla din care se va iesi doar dupa ce all_done =
+nr_clienti. Am folosit MPI_Probe pentru a gestiona eficient mesajele.
+Am decis sa simulez un "mutex" astfel incat sa nu existe conflicte intre
+peers in cazul in care incearca sa acceseze tracker ul in acelasi timp
+pentru anumite resurse (tag uirle 10, 11, 12).
+-TAG 0: trackerul trimite swarm urile si dimensiunile acestora pentru seed si
+peer catre client. Daca clientul nu se afla in swarm ul pentru peer, atunci
+inseamna ca abia ce incepe sa downloadeze un fisier si i se trimit si hashurile
+pentru a putea sti ce sa ceara de la seeds/peers. Daca apare in peer, nu i se
+mai trimit hash urile.
+-TAG 2: un client a terminat de downloadat un fisier. Tracker ul il va sterge
+din swarm ul pentru peers si il va adauga in cel de seeds pentru acel fisier
+-TAG 3: un client a terminat de descarcat tot ce voia, se incrementeaza all_done
+-TAG 10: un client cere acces la tracker. Accesul este gestionat de o variabila
+bool locked_tracker(true locked, false unlocked). Daca trackerul este
+disponibil locked_tracker->true si se trimite un mesaj clientului cu TAG 11
+pentru a-i spune daca e disponibil sau nu.
+-TAG 12: un client a eliberat accesul la tracker. locked_tracker->false
+Dupa ce toti clientii au terminat de descarcat se iese din bucla,iar trackerul
+transmite tuturor clientilor sa se opreasca cu totul (in upload, TAG 4)
+
+thread-ul upload:
+Am folosit o bucla si variabila bool stop. Bucla se va opri cand stop = true.
+Si aici am simulat un mutex astfel incat sa nu existe conflicte intre
+clientii care incearca sa acceseze un anumit peer/seed in acelasi timp
+pentru a cere anumite resurse.
+-TAG 1: primeste numele unui fisier si un hash. Ii va trimite clientului
+respectiv ack = 1 daca il detine sau ack daca nu
+-TAG 4: mesaj primit de la tracker cu scopul de opri cu totul clientii.
+Clientul va iesi din bucla si se opri.
+-TAG 20: cerere de acces a unui client. Accesul se gestioneaza prin 
+variabila bool locked_peer(true locked, false unlocked). Ii trimte
+un mesaj clientului cu tag ul 21 pentru a-i transmite daca e disponibil
+sau nu
+-TAG 22: un client a eliberat accesul seed/peer ului. locked_peer->false
+
+thread-ul download:
+Am folosit un for pentru a trece prin toate fisierele pe care le vrea
+clientul. In cazul in care nu vrea niciun fisier se trimite "NO_REQUEST"
+in loc de numele unui fisier. Daca se vor fisiere, atunci clientul va
+trimite numele unui fisier si asteapta sa primeasca swarm urile si
+hash urile de la tarcker. Clientul nu va descarca de la tracker. Hash
+urile vor fi folosite astfel incat clientul sa stie ce sa ceara. 
+Am folosit o bucla din care se va iesi doar cand se descarca toate
+hash urile din fisierul cerut. Contorizez cu received_hashes.
+Pentru eficienta am folosit un algoritm de tipul round robin. In
+combined_sources am pus atat seeds, cat si peer. Am folosit contorul
+received_hashes pentru a vedea daca am reusit sa descarc toate segmentele.
+Clientul va trece prin toate segmentele si va cere primul segment primului
+see/peer din combined_sources, al doilea de la al doilea seed/peer etc.
+Tinem evidenta seed/peer ului pe care trebuie sa il folosim cu ajutorul
+indexului round_robin_index. Cand round_robin_index ajunge la acelasi
+numar ca marimea lui combined_sources, se reseteaza la 0.
+Daca seed/peer ul ales nu este disponibil se incearca accesarea acestuia
+pana cand devine disponibil. Este posibil ca sed/peer ul sa nu detina
+segmentul, de aceea verific pentru fiecare segment daca este deja
+detinut de client. La fiecare 10 segmente descarcate clientul va cere
+o actualizare a swarmului. Astfel in combined_sources vor fi adaugati
+seed/peers care nu se afla deja in el. Daca tracker ul nu este disponibil,
+se incearca accesarea lui pana cand acesta este disponibil.
+Dupa ce un client termina de descarcat un fisier acesta ve trimite
+tracker ului un mesaj cu tag ul 2. Dupa ce termina tot de descarcat
+va trimite tracker ului un mesaj cu tag ul 3.
+
+peer:
+Am citit informatiile din fisier si le-am trimis tracker ului pe cele
+relevante, apoi fiecare peer asteapta ca tracker ul sa ii spuna daca 
+poate sa inceapa descarcarea.
+
+functii auxilizare:
+create_customType: folosita pentru a crea un MPI personalizat pentru
+structura ClientFile
+read_file: folosita pentru citirea datelor pentru fiecare client
+custom_find: folosita in tracker, verifica daca un hash exista in lista
+de hash uri
+update_owned: folosita in download, actualizeza fisierele si hash urile
+detinute de client
+create_file: folosita in download, creeaza fisierul de output pentru
+client
+has_hash: folosita in download, verifica daca un hash este deja detinut
+de client
+peer_has_hash: folosita in upload, verifica daca peer/seed ul detine
+hash ul cerut
